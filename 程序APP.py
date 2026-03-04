@@ -12,7 +12,7 @@ st.set_page_config(page_title="Cognitive Impairment Prediction", layout="wide")
 # 添加错误处理的模型加载
 @st.cache_resource
 def load_model():
-    """加载模型并添加错误处理"""
+    """加载模型并获取特征信息"""
     try:
         # 获取当前文件所在目录
         current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -20,13 +20,7 @@ def load_model():
         
         # 检查文件是否存在
         if not os.path.exists(model_path):
-            # 尝试其他路径
-            alternative_paths = [
-                'RF.pkl',
-                './RF.pkl',
-                os.path.join(os.getcwd(), 'RF.pkl')
-            ]
-            
+            alternative_paths = ['RF.pkl', './RF.pkl', os.path.join(os.getcwd(), 'RF.pkl')]
             for path in alternative_paths:
                 if os.path.exists(path):
                     model_path = path
@@ -36,16 +30,46 @@ def load_model():
                 st.write("目录中的文件:", os.listdir('.'))
                 st.stop()
         
+        # 加载模型
         model = joblib.load(model_path)
-        return model
+        
+        # 获取模型的特征信息
+        feature_info = {}
+        
+        # 方法1：从模型获取特征名称
+        if hasattr(model, 'feature_names_in_'):
+            feature_info['names'] = list(model.feature_names_in_)
+            feature_info['source'] = 'model.feature_names_in_'
+        # 方法2：尝试从训练数据获取
+        elif hasattr(model, 'n_features_in_'):
+            feature_info['count'] = model.n_features_in_
+            feature_info['source'] = 'model.n_features_in_'
+        else:
+            feature_info['count'] = 8  # 假设8个特征
+            feature_info['source'] = 'assumed'
+        
+        return model, feature_info
+        
     except Exception as e:
         st.error(f"模型加载失败: {str(e)}")
         st.stop()
 
-# 加载模型
-model = load_model()
+# 加载模型和特征信息
+model, feature_info = load_model()
 
-# 特征范围定义（根据提供的特征范围和数据类型）
+# 显示模型信息
+st.sidebar.header("🔧 Model Information")
+st.sidebar.write(f"模型类型: {type(model).__name__}")
+st.sidebar.write(f"特征信息来源: {feature_info.get('source', '未知')}")
+
+if 'names' in feature_info:
+    st.sidebar.write("模型期望的特征:")
+    for i, name in enumerate(feature_info['names']):
+        st.sidebar.write(f"  {i+1}. {name}")
+else:
+    st.sidebar.write(f"模型期望的特征数量: {feature_info.get('count', '未知')}")
+
+# 定义特征范围（使用你的原始特征名称）
 feature_ranges = {
     "D_D": {"type": "numerical", "min": 0.18, "max": 47.17, "default": 2.0},
     "CRP": {"type": "numerical", "min": 3.2, "max": 360, "default": 10.0},
@@ -66,43 +90,73 @@ with st.sidebar:
     st.header("📊 Input Features")
     st.markdown("Enter the following feature values:")
     
-    feature_values = []
+    # 收集用户输入
+    input_dict = {}
     for feature, properties in feature_ranges.items():
-        if properties["type"] == "numerical":
-            value = st.number_input(
-                label=f"**{feature}**",
-                min_value=float(properties["min"]),
-                max_value=float(properties["max"]),
-                value=float(properties["default"]),
-                format="%.2f",
-                help=f"Range: {properties['min']} - {properties['max']}"
-            )
-            feature_values.append(value)
+        value = st.number_input(
+            label=f"**{feature}**",
+            min_value=float(properties["min"]),
+            max_value=float(properties["max"]),
+            value=float(properties["default"]),
+            format="%.2f",
+            help=f"Range: {properties['min']} - {properties['max']}"
+        )
+        input_dict[feature] = value
 
 # 主界面
 col1, col2 = st.columns([1, 1])
 
 with col1:
     st.subheader("📝 Input Summary")
-    input_df = pd.DataFrame([feature_values], columns=list(feature_ranges.keys()))
-    st.dataframe(input_df, use_container_width=True)
+    input_df_display = pd.DataFrame([input_dict])
+    st.dataframe(input_df_display, use_container_width=True)
 
 # 预测按钮
 if st.sidebar.button("🔍 Predict", type="primary", use_container_width=True):
     with st.spinner("Calculating prediction and SHAP values..."):
         try:
-            # 转换为模型输入格式
-            feature_df = pd.DataFrame([feature_values], columns=list(feature_ranges.keys()))
+            # 方法1：如果模型有特征名称，使用它们
+            if 'names' in feature_info:
+                model_features = feature_info['names']
+                
+                # 创建与模型期望完全匹配的DataFrame
+                feature_values = []
+                for feat in model_features:
+                    if feat in input_dict:
+                        feature_values.append(input_dict[feat])
+                    else:
+                        # 如果模型期望的特征不在输入中，使用默认值
+                        st.warning(f"特征 '{feat}' 不在输入中，使用0作为默认值")
+                        feature_values.append(0.0)
+                
+                # 创建带正确列名的DataFrame
+                feature_df = pd.DataFrame([feature_values], columns=model_features)
+                
+            else:
+                # 方法2：如果没有特征名称，使用numpy数组
+                feature_values = [input_dict[feat] for feat in feature_ranges.keys()]
+                feature_df = np.array([feature_values])
+            
+            # 显示调试信息
+            with st.expander("🔧 Debug Info"):
+                st.write("模型类型:", type(model).__name__)
+                if 'names' in feature_info:
+                    st.write("模型特征名称:", feature_info['names'])
+                    st.write("输入数据列名:", list(feature_df.columns))
+                else:
+                    st.write("输入数据形状:", feature_df.shape)
             
             # 模型预测
             predicted_class = model.predict(feature_df)[0]
             predicted_proba = model.predict_proba(feature_df)[0]
             
-            # 获取类别标签（假设二分类）
-            class_labels = ["No Impairment", "Cognitive Impairment"]
-            predicted_label = class_labels[predicted_class]
+            # 获取类别标签
+            if hasattr(model, 'classes_'):
+                class_labels = [str(cls) for cls in model.classes_]
+            else:
+                class_labels = ["No Impairment", "Cognitive Impairment"]
             
-            # 提取预测的类别概率
+            predicted_label = class_labels[predicted_class]
             probability = predicted_proba[predicted_class] * 100
             
             with col2:
@@ -125,98 +179,109 @@ if st.sidebar.button("🔍 Predict", type="primary", use_container_width=True):
                 })
                 st.dataframe(prob_df, use_container_width=True)
             
-            # SHAP 分析部分
-            st.markdown("---")
-            st.subheader("🔬 SHAP Analysis")
-            
+            # SHAP分析
             try:
-                # 计算 SHAP 值
                 explainer = shap.TreeExplainer(model)
-                shap_values = explainer.shap_values(feature_df)
                 
-                # 处理 SHAP 值（针对不同的输出格式）
-                if isinstance(shap_values, list):
-                    # 多分类情况
-                    shap_plot_values = shap_values[predicted_class]
-                    expected_value = explainer.expected_value[predicted_class]
+                if isinstance(feature_df, pd.DataFrame):
+                    shap_values = explainer.shap_values(feature_df)
                 else:
-                    # 二分类或回归
+                    # 如果是numpy数组，转换为DataFrame以便显示
+                    shap_values = explainer.shap_values(feature_df)
+                    feature_df_display = pd.DataFrame(feature_df, columns=list(feature_ranges.keys()))
+                
+                # 处理SHAP值
+                if isinstance(shap_values, list):
+                    shap_plot_values = shap_values[predicted_class]
+                    if isinstance(explainer.expected_value, list):
+                        expected_value = explainer.expected_value[predicted_class]
+                    else:
+                        expected_value = explainer.expected_value
+                else:
                     shap_plot_values = shap_values
                     expected_value = explainer.expected_value
                 
-                # 创建两列布局
-                col_shap1, col_shap2 = st.columns([1, 1])
+                # 显示特征重要性
+                st.subheader("📊 Feature Importance")
                 
-                with col_shap1:
-                    st.write("**Force Plot**")
-                    # 生成 SHAP 力图
-                    fig, ax = plt.subplots(figsize=(10, 3))
-                    shap.force_plot(
-                        expected_value,
-                        shap_plot_values[0],  # 第一个样本
-                        feature_df.iloc[0],
-                        matplotlib=True,
-                        show=False,
-                        figsize=(10, 3)
-                    )
-                    plt.tight_layout()
-                    st.pyplot(fig)
-                    plt.close()
-                
-                with col_shap2:
-                    st.write("**Feature Importance**")
-                    # 创建特征重要性条形图
-                    if isinstance(shap_plot_values, np.ndarray):
-                        shap_importance = np.abs(shap_plot_values[0])
-                        feature_imp = pd.DataFrame({
-                            'Feature': list(feature_ranges.keys()),
-                            '|SHAP Value|': shap_importance
-                        }).sort_values('|SHAP Value|', ascending=True)
+                if isinstance(shap_plot_values, np.ndarray):
+                    # 创建特征重要性DataFrame
+                    if isinstance(feature_df, pd.DataFrame):
+                        feature_names = feature_df.columns
+                    else:
+                        feature_names = list(feature_ranges.keys())
+                    
+                    # 确保长度匹配
+                    if len(shap_plot_values[0]) == len(feature_names):
+                        importance_df = pd.DataFrame({
+                            'Feature': feature_names,
+                            'SHAP Value': shap_plot_values[0],
+                            '|SHAP|': np.abs(shap_plot_values[0])
+                        }).sort_values('|SHAP|', ascending=True)
                         
-                        fig2, ax2 = plt.subplots(figsize=(8, 4))
-                        ax2.barh(feature_imp['Feature'], feature_imp['|SHAP Value|'])
-                        ax2.set_xlabel('|SHAP Value| (Impact on Prediction)')
-                        ax2.set_title('Feature Impact')
+                        # 创建图表
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        colors = ['red' if x > 0 else 'blue' for x in importance_df['SHAP Value']]
+                        bars = ax.barh(importance_df['Feature'], importance_df['|SHAP|'], color=colors, alpha=0.7)
+                        ax.set_xlabel('|SHAP Value| (Impact on Prediction)')
+                        ax.set_title('SHAP Feature Impact')
+                        
+                        # 添加数值标签
+                        for bar, val in zip(bars, importance_df['SHAP Value']):
+                            width = bar.get_width()
+                            ax.text(width, bar.get_y() + bar.get_height()/2, 
+                                   f'{val:.3f}', ha='left', va='center', fontsize=9)
+                        
                         plt.tight_layout()
-                        st.pyplot(fig2)
+                        st.pyplot(fig)
                         plt.close()
+                        
+                        # 显示详细SHAP值
+                        with st.expander("📋 View Detailed SHAP Values"):
+                            st.dataframe(importance_df[['Feature', 'SHAP Value', '|SHAP|']], use_container_width=True)
+                    else:
+                        st.warning(f"特征数量不匹配: SHAP值数量={len(shap_plot_values[0])}, 特征数量={len(feature_names)}")
                 
-                # 显示详细的SHAP值
-                with st.expander("📋 View Detailed SHAP Values"):
-                    shap_df = pd.DataFrame({
-                        'Feature': list(feature_ranges.keys()),
-                        'Feature Value': feature_values,
-                        'SHAP Value': shap_plot_values[0] if isinstance(shap_plot_values, np.ndarray) else shap_plot_values
-                    })
-                    st.dataframe(shap_df, use_container_width=True)
-                    
             except Exception as e:
-                st.warning(f"SHAP visualization unavailable: {str(e)}")
+                st.warning(f"SHAP分析不可用: {str(e)}")
                 
-                # 备用方案：显示特征重要性
+                # 备用：显示模型特征重要性
                 if hasattr(model, 'feature_importances_'):
-                    st.subheader("📊 Feature Importance (Alternative)")
-                    feature_importance = pd.DataFrame({
-                        'Feature': list(feature_ranges.keys()),
-                        'Importance': model.feature_importances_
-                    }).sort_values('Importance', ascending=True)
+                    st.subheader("📊 Model Feature Importance")
                     
-                    fig, ax = plt.subplots(figsize=(10, 6))
-                    bars = ax.barh(feature_importance['Feature'], feature_importance['Importance'])
-                    ax.set_xlabel('Feature Importance')
-                    ax.set_title('Random Forest Feature Importance')
+                    if isinstance(feature_df, pd.DataFrame):
+                        feature_names = feature_df.columns
+                    else:
+                        feature_names = list(feature_ranges.keys())
                     
-                    # 添加数值标签
-                    for bar in bars:
-                        width = bar.get_width()
-                        ax.text(width, bar.get_y() + bar.get_height()/2, 
-                               f'{width:.3f}', ha='left', va='center', fontsize=10)
-                    
-                    plt.tight_layout()
-                    st.pyplot(fig)
+                    # 确保长度匹配
+                    if len(model.feature_importances_) == len(feature_names):
+                        imp_df = pd.DataFrame({
+                            'Feature': feature_names,
+                            'Importance': model.feature_importances_
+                        }).sort_values('Importance', ascending=True)
+                        
+                        fig, ax = plt.subplots(figsize=(10, 6))
+                        bars = ax.barh(imp_df['Feature'], imp_df['Importance'])
+                        ax.set_xlabel('Feature Importance')
+                        ax.set_title('Random Forest Feature Importance')
+                        
+                        for bar in bars:
+                            width = bar.get_width()
+                            ax.text(width, bar.get_y() + bar.get_height()/2, 
+                                   f'{width:.3f}', ha='left', va='center', fontsize=10)
+                        
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        
+                        with st.expander("📋 View Detailed Feature Importance"):
+                            st.dataframe(imp_df, use_container_width=True)
+                    else:
+                        st.write(f"特征重要性数量: {len(model.feature_importances_)}")
+                        st.write(f"特征名称数量: {len(feature_names)}")
                     
         except Exception as e:
-            st.error(f"Prediction failed: {str(e)}")
+            st.error(f"预测失败: {str(e)}")
             st.exception(e)
 
 # 添加页脚
